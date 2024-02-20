@@ -101,6 +101,11 @@ bool ld2410::presenceDetected()
 	return target_type_ != 0;
 }
 
+bool ld2410::isEngineeringMode()
+{
+	return engineering_mode_;
+}
+
 bool ld2410::stationaryTargetDetected()
 {
 	if((target_type_ & 0x02) && stationary_target_distance_ > 0 && stationary_target_energy_ > 0)
@@ -368,11 +373,29 @@ bool ld2410::parse_data_frame_()
 				}
 			}
 			#endif
-			/*
-			 *
-			 *	To-do support engineering mode
-			 *
-			 */
+			target_type_                = radar_data_frame_[8];
+			moving_target_distance_ 	= radar_data_frame_[9] + (radar_data_frame_[10] << 8);
+			moving_target_energy_       = radar_data_frame_[11];
+			stationary_target_distance_ = radar_data_frame_[12] + (radar_data_frame_[13] << 8);
+			stationary_target_energy_   = radar_data_frame_[14];
+			engineering_detection_distance     	= radar_data_frame_[15] + (radar_data_frame_[16] << 8);
+			engineering_max_gates_moving_distance    	= radar_data_frame_[17]+1;
+			engineering_max_gates_stationary_distance	= radar_data_frame_[18]+1;
+			
+			uint8_t pos = 19;
+
+			// motion energy
+			for(uint8_t gate = 0; gate < engineering_max_gates_moving_distance; ++gate) {
+				engineering_moving_target_energy[gate] = radar_data_frame_[pos++];
+			}
+			// stationary energy
+			pos+=2;
+			for(uint8_t gate = 0; gate < engineering_max_gates_stationary_distance; ++gate) {
+				engineering_stationary_target_energy[gate] = radar_data_frame_[pos++];
+			}
+			engineering_mode_ = true;
+			radar_uart_last_packet_ = millis();
+			return true;
 		}
 		else if(intra_frame_data_length_ == 13 && radar_data_frame_[6] == 0x02 && radar_data_frame_[7] == 0xAA && radar_data_frame_[17] == 0x55 && radar_data_frame_[18] == 0x00)	//Normal target data
 		{
@@ -419,6 +442,7 @@ bool ld2410::parse_data_frame_()
 				}
 			}
 			#endif
+			engineering_mode_ = false;
 			radar_uart_last_packet_ = millis();
 			return true;
 		}
@@ -613,6 +637,34 @@ bool ld2410::parse_command_frame_()
 				debug_uart_->print(F("\nSensor idle timeout: "));
 				debug_uart_->print(sensor_idle_time);
 				debug_uart_->print('s');
+			}
+			#endif
+			return true;
+		}
+		else
+		{
+			if(debug_uart_ != nullptr)
+			{
+				debug_uart_->print(F("failed"));
+			}
+			return false;
+		}
+	}
+	else if(intra_frame_data_length_ == 4 && latest_ack_ == 0x62) // Engineering mode
+	{
+		#ifdef LD2410_DEBUG_COMMANDS
+		if(debug_uart_ != nullptr)
+		{
+			debug_uart_->print(F("\nACK for enginnering mode: "));
+		}
+		#endif
+		if(latest_command_success_)
+		{
+			radar_uart_last_packet_ = millis();
+			#ifdef LD2410_DEBUG_COMMANDS
+			if(debug_uart_ != nullptr)
+			{
+				debug_uart_->print(F("OK"));
 			}
 			#endif
 			return true;
@@ -824,25 +876,31 @@ bool ld2410::leave_configuration_mode_()
 
 bool ld2410::requestStartEngineeringMode()
 {
-	send_command_preamble_();
-	//Request firmware
-	radar_uart_->write((byte) 0x02);	//Command is two bytes long
-	radar_uart_->write((byte) 0x00);
-	radar_uart_->write((byte) 0x62);	//Request enter command mode
-	radar_uart_->write((byte) 0x00);
-	send_command_postamble_();
-	radar_uart_last_command_ = millis();
-	while(millis() - radar_uart_last_command_ < radar_uart_command_timeout_)
-	{
-		if(read_frame_())
-		{
-			if(latest_ack_ == 0x62 && latest_command_success_)
-			{
-				return true;
-			}
-		}
+  bool ret = false;
+  if(enter_configuration_mode_())
+  {
+    send_command_preamble_();
+    //Request firmware
+    radar_uart_->write((byte) 0x02);	//Command is two bytes long
+    radar_uart_->write((byte) 0x00);
+    radar_uart_->write((byte) 0x62);	//Request enter command mode
+    radar_uart_->write((byte) 0x00);
+    send_command_postamble_();
+    radar_uart_last_command_ = millis();
+    while(millis() - radar_uart_last_command_ < radar_uart_command_timeout_)
+    {
+      if(read_frame_())
+      {
+        if(latest_ack_ == 0x62 && latest_command_success_)
+        {
+          ret = true;
+          break;
+        }
+      }
+    }
 	}
-	return false;
+	leave_configuration_mode_();
+	return ret;
 }
 
 bool ld2410::requestEndEngineeringMode()
